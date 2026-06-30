@@ -1,0 +1,1160 @@
+diff --git a/epan/dissectors/packet-amqp.c b/epan/dissectors/packet-amqp.c
+index 07acd3e2a2..4f3a2734a4 100644
+--- a/epan/dissectors/packet-amqp.c
++++ b/epan/dissectors/packet-amqp.c
+@@ -155,6 +155,8 @@ static const value_string match_criteria[] = {
+ #define AMQP_0_9_METHOD_CONNECTION_CLOSE_OK                            51
+ #define AMQP_0_9_METHOD_CONNECTION_BLOCKED                             60
+ #define AMQP_0_9_METHOD_CONNECTION_UNBLOCKED                           61
++#define AMQP_0_9_METHOD_CONNECTION_UPDATE_SECRET                       70
++#define AMQP_0_9_METHOD_CONNECTION_UPDATE_SECRET_OK                    71
+ 
+ #define AMQP_0_9_METHOD_CHANNEL_OPEN                                   10
+ #define AMQP_0_9_METHOD_CHANNEL_OPEN_OK                                11
+@@ -1269,6 +1271,25 @@ static int hf_amqp_method_connection_close_reply_text;
+ static int hf_amqp_method_connection_close_class_id;
+ static int hf_amqp_method_connection_close_method_id;
+ static int hf_amqp_method_connection_blocked_reason;
++static int hf_amqp_method_connection_update_secret_new_secret;
++static int hf_amqp_method_connection_update_secret_reason;
++static int hf_amqp_jwt_header_b64;
++static int hf_amqp_jwt_payload_b64;
++static int hf_amqp_jwt_signature_b64;
++static int hf_amqp_jwt_header_json;
++static int hf_amqp_jwt_payload_json;
++static int hf_amqp_jwt_header_b64;
++static int hf_amqp_jwt_payload_b64;
++static int hf_amqp_jwt_signature_b64;
++static int hf_amqp_jwt_header_json;
++static int hf_amqp_jwt_payload_json;
++
++static int hf_amqp_jwt_claim;
++static int hf_amqp_jwt_claim_scope;
++
++static int ett_amqp_jwt;
++static int ett_amqp_jwt_header;
++static int ett_amqp_jwt_payload;
+ static int hf_amqp_method_channel_open_out_of_band;
+ static int hf_amqp_method_channel_open_ok_channel_id;
+ static int hf_amqp_method_channel_flow_active;
+@@ -1508,6 +1529,8 @@ static int hf_amqp_header_tunnel_durable;
+ static int hf_amqp_header_tunnel_broadcast;
+ static int hf_amqp_0_10_dtx_xa_status;
+ static int hf_amqp_payload;
++static int hf_amqp_payload_text;
++static int hf_amqp_build;          /* modified-build marker */
+ static int hf_amqp_init_protocol;
+ static int hf_amqp_init_id;
+ static int hf_amqp_init_id_major;
+@@ -2050,6 +2073,8 @@ static const value_string amqp_method_connection_methods [] = {
+     {51, "Close-Ok"},
+     {60, "Blocked"},
+     {61, "Unblocked"},
++    {70, "Update-Secret"},
++    {71, "Update-Secret-Ok"},
+     {0, NULL}
+ };
+ 
+@@ -6542,6 +6567,22 @@ dissect_amqp_1_0_SASL_frame(tvbuff_t *tvb,
+     }
+ }
+ 
++/* ---- modified-build marker (custom) ---------------------------------- */
++#define AMQP_BUILD_TAG "github.com/adamTheApiGuy/amqp-wireshark-enhancement"
++
++static void
++amqp_mark_modified_build(proto_tree* amqp_tree, tvbuff_t* tvb)
++{
++    proto_item* bi;
++
++    if (!amqp_tree)
++        return;
++
++    bi = proto_tree_add_string(amqp_tree, hf_amqp_build, tvb, 0, 0, AMQP_BUILD_TAG);
++    proto_item_set_generated(bi);
++}
++/* ---- End of modified-build marker (custom) ---------------------------------- */
++
+ static int
+ dissect_amqp_1_0_frame(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data _U_)
+ {
+@@ -6759,6 +6800,16 @@ dissect_amqp_0_10_frame(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, voi
+     return tvb_reported_length(tvb);
+ }
+ 
++static bool amqp_secret_looks_like_jwt(const char* s);
++
++static char* amqp_pretty_json(wmem_allocator_t* pool, const char* json);
++
++static void amqp_add_json_claim(proto_tree* tree, tvbuff_t* tvb, int offset,
++    int len, int hf, const char* json, const char* key);
++
++static void dissect_amqp_jwt(proto_tree* tree, tvbuff_t* tvb,
++    packet_info* pinfo, int secret_offset, const char* jwt);
++
+ 
+ /*  Dissection routine for method Connection.Start                        */
+ 
+@@ -6801,32 +6852,66 @@ dissect_amqp_0_9_method_connection_start(tvbuff_t *tvb, packet_info *pinfo,
+ /*  Dissection routine for method Connection.Start-Ok                     */
+ 
+ static int
+-dissect_amqp_0_9_method_connection_start_ok(tvbuff_t *tvb, packet_info *pinfo,
+-    int offset, proto_tree *args_tree)
++dissect_amqp_0_9_method_connection_start_ok(tvbuff_t* tvb, packet_info* pinfo,
++    int offset, proto_tree* args_tree)
+ {
+-    proto_item *ti;
++    proto_item* ti;
++    uint32_t props_len;
++    uint32_t response_len;
++    int response_offset;
++    const char* secret;
++    int i;
++    int last_nul = -1;
++    proto_tree* jwt_tree;
+ 
+-    /*  client-properties (table)  */
+-    ti = proto_tree_add_item(
+-        args_tree, hf_amqp_method_connection_start_ok_client_properties,
+-        tvb, offset + 4, tvb_get_ntohl(tvb, offset), ENC_NA);
+-    dissect_amqp_0_9_field_table(tvb, pinfo, offset + 4, tvb_get_ntohl(tvb, offset), ti);
+-    offset += 4 + tvb_get_ntohl(tvb, offset);
++    amqp_mark_modified_build(args_tree, tvb);
+ 
+-    /*  mechanism (shortstr)     */
+-    proto_tree_add_item(args_tree, hf_amqp_method_connection_start_ok_mechanism,
+-        tvb, offset, 1, ENC_ASCII|ENC_BIG_ENDIAN);
+-    offset += (1 + tvb_get_uint8(tvb, offset));
++    props_len = tvb_get_ntohl(tvb, offset);
+ 
+-    /*  response (longstr)       */
+-    proto_tree_add_item(args_tree, hf_amqp_method_connection_start_ok_response,
++    props_len = tvb_get_ntohl(tvb, offset);
++    ti = proto_tree_add_item(args_tree,
++        hf_amqp_method_connection_start_ok_client_properties,
++        tvb, offset + 4, props_len, ENC_NA);
++    dissect_amqp_0_9_field_table(tvb, pinfo, offset + 4, props_len, ti);
++    offset += 4 + props_len;
++
++    proto_tree_add_item(args_tree,
++        hf_amqp_method_connection_start_ok_mechanism,
++        tvb, offset, 1, ENC_ASCII | ENC_BIG_ENDIAN);
++    offset += 1 + tvb_get_uint8(tvb, offset);
++
++    response_len = tvb_get_ntohl(tvb, offset);
++    response_offset = offset + 4;
++
++    ti = proto_tree_add_item(args_tree,
++        hf_amqp_method_connection_start_ok_response,
+         tvb, offset, 4, ENC_BIG_ENDIAN);
+-    offset += (4 + tvb_get_ntohl(tvb, offset));
+ 
+-    /*  locale (shortstr)        */
+-    proto_tree_add_item(args_tree, hf_amqp_method_connection_start_ok_locale,
+-        tvb, offset, 1, ENC_ASCII|ENC_BIG_ENDIAN);
+-    offset += (1 + tvb_get_uint8(tvb, offset));
++    for (i = 0; i < (int)response_len; i++) {
++        if (tvb_get_uint8(tvb, response_offset + i) == 0)
++            last_nul = i;
++    }
++
++    if (last_nul >= 0 && last_nul + 1 < (int)response_len) {
++        secret = (const char*)tvb_get_string_enc(pinfo->pool,
++            tvb,
++            response_offset + last_nul + 1,
++            response_len - last_nul - 1,
++            ENC_ASCII);
++
++        if (amqp_secret_looks_like_jwt(secret)) {
++            jwt_tree = proto_item_add_subtree(ti, ett_amqp_jwt);
++            dissect_amqp_jwt(jwt_tree, tvb, pinfo,
++                response_offset + last_nul + 1, secret);
++        }
++    }
++
++    offset += 4 + response_len;
++
++    proto_tree_add_item(args_tree,
++        hf_amqp_method_connection_start_ok_locale,
++        tvb, offset, 1, ENC_ASCII | ENC_BIG_ENDIAN);
++    offset += 1 + tvb_get_uint8(tvb, offset);
+ 
+     return offset;
+ }
+@@ -7032,6 +7117,693 @@ dissect_amqp_0_9_method_connection_unblocked(tvbuff_t *tvb _U_,
+     return offset;
+ }
+ 
++static char*
++amqp_base64url_to_base64(wmem_allocator_t* pool, const char* in, size_t len)
++{
++    size_t pad;
++    char* out;
++
++    pad = (4 - (len % 4)) % 4;
++    out = (char*)wmem_alloc0(pool, len + pad + 1);
++
++    memcpy(out, in, len);
++
++    for (size_t i = 0; i < len; i++) {
++        if (out[i] == '-')
++            out[i] = '+';
++        else if (out[i] == '_')
++            out[i] = '/';
++    }
++
++    for (size_t i = 0; i < pad; i++) {
++        out[len + i] = '=';
++    }
++
++    out[len + pad] = '\0';
++
++    return out;
++}
++
++static char*
++amqp_base64url_decode_to_string(wmem_allocator_t* pool, const char* in, size_t len)
++{
++    char* std_b64;
++    guchar* decoded;
++    gsize decoded_len;
++    char* out;
++
++    std_b64 = amqp_base64url_to_base64(pool, in, len);
++
++    decoded = g_base64_decode(std_b64, &decoded_len);
++    if (!decoded)
++        return NULL;
++
++    out = (char*)wmem_alloc0(pool, decoded_len + 1);
++    memcpy(out, decoded, decoded_len);
++    out[decoded_len] = '\0';
++
++    g_free(decoded);
++
++    return out;
++}
++
++static char*
++amqp_base64_decode_to_string(wmem_allocator_t* pool, const char* input)
++{
++    gchar* normalized;
++    guchar* decoded;
++    gsize out_len;
++    int len;
++    int i;
++    char* out;
++
++    if (!input)
++        return NULL;
++
++    len = (int)strlen(input);
++
++    /* duplicate so we can normalize URL-safe base64 */
++    normalized = g_strdup(input);
++
++    /* convert URL-safe -> standard */
++    for (i = 0; i < len; i++) {
++        if (normalized[i] == '-')
++            normalized[i] = '+';
++        else if (normalized[i] == '_')
++            normalized[i] = '/';
++    }
++
++    /* add padding if missing */
++    while ((len % 4) != 0) {
++        normalized = g_realloc(normalized, len + 2);
++        normalized[len] = '=';
++        normalized[len + 1] = '\0';
++        len++;
++    }
++
++    decoded = g_base64_decode(normalized, &out_len);
++
++    g_free(normalized);
++
++    if (!decoded || out_len == 0) {
++        if (decoded)
++            g_free(decoded);
++        return NULL;
++    }
++
++    /* make null terminated */
++    out = wmem_alloc(pool, out_len + 1);
++    memcpy(out, decoded, out_len);
++    out[out_len] = '\0';
++
++    g_free(decoded);
++
++    return out;
++}
++
++static gboolean
++amqp_looks_like_base64(const char* s)
++{
++    int len;
++    int i;
++
++    if (!s)
++        return FALSE;
++
++    len = (int)strlen(s);
++
++    /* base64 usually multiple of 4 */
++    if (len < 8)
++        return FALSE;
++
++    for (i = 0; i < len; i++) {
++        if (!(g_ascii_isalnum(s[i]) ||
++            s[i] == '+' ||
++            s[i] == '/' ||
++            s[i] == '=' ||
++            s[i] == '-' ||   /* url safe */
++            s[i] == '_'))
++            return FALSE;
++    }
++
++    return TRUE;
++}
++
++static gboolean
++amqp_looks_like_xml(const char* s)
++{
++    if (!s)
++        return FALSE;
++
++    while (*s && g_ascii_isspace(*s))
++        s++;
++
++    /* starts with <?xml ... or <tag */
++    return (*s == '<');
++}
++
++static gboolean
++amqp_looks_like_jwt_payload(const char* s)
++{
++    const char* p1;
++    const char* p2;
++
++    if (!s)
++        return FALSE;
++
++    p1 = strchr(s, '.');
++    if (!p1)
++        return FALSE;
++
++    p2 = strchr(p1 + 1, '.');
++    if (!p2)
++        return FALSE;
++
++    /* should have 3 sections */
++    if (strlen(p2 + 1) < 8)
++        return FALSE;
++
++    return TRUE;
++}
++
++static gboolean
++amqp_looks_like_text(const guint8* buf, int len)
++{
++    int i;
++    int printable = 0;
++
++    if (!buf || len <= 0)
++        return FALSE;
++
++    for (i = 0; i < len; i++) {
++
++        if (buf[i] == '\r' ||
++            buf[i] == '\n' ||
++            buf[i] == '\t') {
++            printable++;
++            continue;
++        }
++
++        if (g_ascii_isprint(buf[i]))
++            printable++;
++    }
++
++    return ((printable * 100) / len) > 90;
++}
++
++static gboolean
++amqp_looks_like_json(const char* s)
++{
++    const char* p;
++    const char* q;
++
++    if (!s)
++        return FALSE;
++
++    p = s;
++
++    while (*p && g_ascii_isspace(*p))
++        p++;
++
++    /* JSON object */
++    if (*p == '{') {
++        return (strchr(p, ':') != NULL && strchr(p, '}') != NULL);
++    }
++
++    /* JSON array */
++    if (*p == '[') {
++        q = p + 1;
++
++        while (*q && g_ascii_isspace(*q))
++            q++;
++
++        /*
++         * Reject log/timestamp style:
++         * [2026-06-26 19:01:46]
++         */
++        if (g_ascii_isdigit(*q))
++            return FALSE;
++
++        if (*q == '{' || *q == '[' || *q == '"' ||
++            *q == '-' ||
++            g_str_has_prefix(q, "true") ||
++            g_str_has_prefix(q, "false") ||
++            g_str_has_prefix(q, "null")) {
++
++            return (strchr(q, ']') != NULL);
++        }
++    }
++
++    return FALSE;
++}
++
++/*  JWT decoder                */
++
++static bool
++amqp_secret_looks_like_jwt(const char *s)
++{
++    const char *p1, *p2;
++
++    if (!s || strlen(s) < 20)
++        return false;
++
++    p1 = strchr(s, '.');
++    if (!p1)
++        return false;
++
++    p2 = strchr(p1 + 1, '.');
++    if (!p2)
++        return false;
++
++    if (strchr(p2 + 1, '.'))
++        return false;
++
++    if (strncmp(s, "eyJ", 3) != 0)
++        return false;
++
++    return true;
++}
++
++static char*
++amqp_json_get_value(wmem_allocator_t* pool, const char* json, const char* key)
++{
++    const char* p, * start, * end;
++    char pattern[128];
++
++    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
++
++    p = strstr(json, pattern);
++    if (!p)
++        return NULL;
++
++    p += strlen(pattern);
++
++    while (*p && g_ascii_isspace(*p))
++        p++;
++
++    if (*p != ':')
++        return NULL;
++
++    p++;
++
++    while (*p && g_ascii_isspace(*p))
++        p++;
++
++    if (*p == '"') {
++        p++;
++        start = p;
++
++        while (*p) {
++            if (*p == '"' && *(p - 1) != '\\')
++                break;
++            p++;
++        }
++
++        return wmem_strndup(pool, start, p - start);
++    }
++
++    start = p;
++
++    while (*p && *p != ',' && *p != '}' && *p != ']')
++        p++;
++
++    end = p;
++
++    while (end > start && g_ascii_isspace(*(end - 1)))
++        end--;
++
++    return wmem_strndup(pool, start, end - start);
++}
++
++static char*
++amqp_epoch_to_local_time_string(wmem_allocator_t* pool, const char* epoch_str)
++{
++    gint64 epoch;
++    GDateTime* dt;
++    char* formatted;
++    char* out;
++
++    if (!epoch_str || !g_ascii_string_to_signed(epoch_str, 10, 0, G_MAXINT64, &epoch, NULL))
++        return NULL;
++
++    dt = g_date_time_new_from_unix_local(epoch);
++    if (!dt)
++        return NULL;
++
++    formatted = g_date_time_format(dt, "%Y-%m-%d %H:%M:%S %Z");
++    g_date_time_unref(dt);
++
++    if (!formatted)
++        return NULL;
++
++    out = wmem_strdup_printf(pool, "%s (%s)", epoch_str, formatted);
++    g_free(formatted);
++
++    return out;
++}
++
++static void
++amqp_add_json_claim(proto_tree* tree, tvbuff_t* tvb, int offset, int len,
++    int hf, const char* json, const char* key)
++{
++    char* value;
++    char* time_value;
++
++    value = amqp_json_get_value(wmem_file_scope(), json, key);
++    if (!value)
++        return;
++
++    if (g_strcmp0(key, "exp") == 0 ||
++        g_strcmp0(key, "iat") == 0 ||
++        g_strcmp0(key, "nbf") == 0) {
++
++        time_value = amqp_epoch_to_local_time_string(wmem_file_scope(), value);
++        if (time_value) {
++            proto_tree_add_string(tree, hf, tvb, offset, len, time_value);
++            return;
++        }
++    }
++
++    proto_tree_add_string(tree, hf, tvb, offset, len, value);
++}
++
++static void
++amqp_add_scope_items(proto_tree* tree, tvbuff_t* tvb, int offset, int len,
++    const char* scope)
++{
++    char** parts;
++    int i;
++
++    if (!scope)
++        return;
++
++    parts = g_strsplit(scope, " ", -1);
++
++    for (i = 0; parts[i] != NULL; i++) {
++        if (parts[i][0] == '\0')
++            continue;
++
++        proto_tree_add_string_format(tree,
++            hf_amqp_jwt_claim_scope,
++            tvb,
++            offset,
++            len,
++            parts[i],
++            "scope item: %s",
++            parts[i]);
++    }
++
++    g_strfreev(parts);
++}
++
++static char*
++amqp_pretty_json(wmem_allocator_t* pool, const char* json)
++{
++    size_t len;
++    char* out;
++    int indent = 0;
++    int j = 0;
++    bool in_string = false;
++    bool escape = false;
++    size_t i;
++
++    if (!json)
++        return NULL;
++
++    len = strlen(json);
++    out = (char*)wmem_alloc0(pool, (len * 4) + 1);
++
++    for (i = 0; i < len; i++) {
++        char c = json[i];
++
++        if (escape) {
++            out[j++] = c;
++            escape = false;
++            continue;
++        }
++
++        if (c == '\\' && in_string) {
++            out[j++] = c;
++            escape = true;
++            continue;
++        }
++
++        if (c == '"') {
++            out[j++] = c;
++            in_string = !in_string;
++            continue;
++        }
++
++        if (!in_string && (c == '{' || c == '[')) {
++            out[j++] = c;
++            out[j++] = '\n';
++            indent++;
++            for (int k = 0; k < indent * 2; k++)
++                out[j++] = ' ';
++        }
++        else if (!in_string && c == ',') {
++            out[j++] = c;
++            out[j++] = '\n';
++            for (int k = 0; k < indent * 2; k++)
++                out[j++] = ' ';
++        }
++        else if (!in_string && (c == '}' || c == ']')) {
++            out[j++] = '\n';
++            if (indent > 0)
++                indent--;
++            for (int k = 0; k < indent * 2; k++)
++                out[j++] = ' ';
++            out[j++] = c;
++        }
++        else if (!in_string && c == ':') {
++            out[j++] = c;
++            out[j++] = ' ';
++        }
++        else {
++            out[j++] = c;
++        }
++    }
++
++    out[j] = '\0';
++    return out;
++}
++
++static void
++amqp_add_json_top_level_claims(proto_tree* tree, tvbuff_t* tvb,
++    int offset, int len, const char* json)
++{
++    const char* p = json;
++
++    while ((p = strchr(p, '"')) != NULL) {
++        const char* key_start = p + 1;
++        const char* key_end = strchr(key_start, '"');
++        const char* colon;
++        const char* value_start;
++        const char* value_end;
++        char* key;
++        char* value;
++
++        if (!key_end)
++            break;
++
++        colon = strchr(key_end + 1, ':');
++        if (!colon)
++            break;
++
++        value_start = colon + 1;
++        while (*value_start && g_ascii_isspace(*value_start))
++            value_start++;
++
++        if (*value_start == '"') {
++            value_start++;
++            value_end = value_start;
++            while (*value_end) {
++                if (*value_end == '"' && *(value_end - 1) != '\\')
++                    break;
++                value_end++;
++            }
++        }
++        else {
++            value_end = value_start;
++            while (*value_end && *value_end != ',' && *value_end != '}')
++                value_end++;
++        }
++
++        key = wmem_strndup(wmem_file_scope(), key_start, key_end - key_start);
++        value = wmem_strndup(wmem_file_scope(), value_start, value_end - value_start);
++
++        if (strcmp(key, "scope") == 0) {
++            proto_item* scope_ti;
++            proto_tree* scope_tree;
++
++            scope_ti = proto_tree_add_string(tree,
++                hf_amqp_jwt_claim_scope,
++                tvb, offset, len,
++                value);
++
++            proto_item_set_text(scope_ti, "scope: %s", value);
++
++            scope_tree = proto_item_add_subtree(scope_ti, ett_amqp_jwt_payload);
++
++            amqp_add_scope_items(scope_tree, tvb, offset, len, value);
++        }
++        else {
++            if (strcmp(key, "exp") == 0 ||
++                strcmp(key, "iat") == 0 ||
++                strcmp(key, "nbf") == 0 ||
++                strcmp(key, "auth_time") == 0) {
++
++                char* time_value;
++
++                time_value = amqp_epoch_to_local_time_string(wmem_file_scope(), value);
++                if (time_value)
++                    value = time_value;
++            }
++
++            proto_tree_add_string_format(tree,
++                hf_amqp_jwt_claim,
++                tvb, offset, len,
++                value,
++                "%s: %s",
++                key, value);
++        }
++
++        p = value_end + 1;
++    }
++}
++static void
++dissect_amqp_jwt(proto_tree* tree, tvbuff_t* tvb, packet_info* pinfo,
++    int secret_offset, const char* jwt)
++{
++    const char* p1, * p2;
++    size_t header_len, payload_len, sig_len;
++    int payload_offset;
++    char* header_b64, * payload_b64, * sig_b64;
++    char* header_json, * payload_json;
++    char* header_pretty, * payload_pretty;
++    proto_item* header_ti, * payload_ti;
++    proto_tree* header_tree, * payload_tree;
++
++    p1 = strchr(jwt, '.');
++    if (!p1)
++        return;
++
++    p2 = strchr(p1 + 1, '.');
++    if (!p2)
++        return;
++
++    header_len = p1 - jwt;
++    payload_len = p2 - p1 - 1;
++    sig_len = strlen(p2 + 1);
++    payload_offset = secret_offset + (int)header_len + 1;
++
++    header_b64 = wmem_strndup(pinfo->pool, jwt, header_len);
++    payload_b64 = wmem_strndup(pinfo->pool, p1 + 1, payload_len);
++    sig_b64 = wmem_strndup(pinfo->pool, p2 + 1, sig_len);
++
++    proto_tree_add_string(tree, hf_amqp_jwt_header_b64,
++        tvb, secret_offset, (int)header_len, header_b64);
++
++    proto_tree_add_string(tree, hf_amqp_jwt_payload_b64,
++        tvb, payload_offset, (int)payload_len, payload_b64);
++
++    proto_tree_add_string(tree, hf_amqp_jwt_signature_b64,
++        tvb, payload_offset + (int)payload_len + 1,
++        (int)sig_len, sig_b64);
++
++    header_json = amqp_base64url_decode_to_string(pinfo->pool,
++        header_b64, header_len);
++
++    payload_json = amqp_base64url_decode_to_string(pinfo->pool,
++        payload_b64, payload_len);
++
++    if (header_json) {
++        header_pretty = amqp_pretty_json(pinfo->pool, header_json);
++
++        header_ti = proto_tree_add_string_format(tree,
++            hf_amqp_jwt_header_json,
++            tvb,
++            secret_offset,
++            (int)header_len,
++            header_pretty,
++            "JWT Header JSON Pretty:\n%s",
++            header_pretty);
++
++        header_tree = proto_item_add_subtree(header_ti, ett_amqp_jwt_header);
++
++        amqp_add_json_top_level_claims(header_tree, tvb, secret_offset,
++            (int)header_len, header_json);
++    }
++
++    if (payload_json) {
++        payload_pretty = amqp_pretty_json(pinfo->pool, payload_json);
++
++        payload_ti = proto_tree_add_string_format(tree,
++            hf_amqp_jwt_payload_json,
++            tvb,
++            payload_offset,
++            (int)payload_len,
++            payload_pretty,
++            "JWT Payload JSON Pretty:\n%s",
++            payload_pretty);
++
++        payload_tree = proto_item_add_subtree(payload_ti, ett_amqp_jwt_payload);
++
++        amqp_add_json_top_level_claims(payload_tree, tvb, payload_offset,
++            (int)payload_len, payload_json);
++    }
++}
++/*  end of JWT decoder                */
++/*  Dissection routine for method Connection.Update-Secret                */
++
++static int
++dissect_amqp_0_9_method_connection_update_secret(tvbuff_t* tvb,
++    packet_info* pinfo, int offset, proto_tree* args_tree)
++{
++    uint32_t secret_len;
++    int secret_offset;
++    const uint8_t* secret;
++    proto_item* secret_ti;
++    proto_tree* jwt_tree;
++
++    amqp_mark_modified_build(args_tree, tvb);
++
++    /* new-secret is longstr: 4-byte length + bytes */
++    secret_len = tvb_get_ntohl(tvb, offset);
++    secret_offset = offset + 4;
++
++    secret_ti = proto_tree_add_item_ret_string(args_tree,
++        hf_amqp_method_connection_update_secret_new_secret,
++        tvb, secret_offset, secret_len,
++        ENC_ASCII | ENC_NA, pinfo->pool, &secret);
++
++    if (amqp_secret_looks_like_jwt((const char*)secret)) {
++        jwt_tree = proto_item_add_subtree(secret_ti, ett_amqp_jwt);
++        dissect_amqp_jwt(jwt_tree, tvb, pinfo, secret_offset, (const char*)secret);
++    }
++
++    offset += 4 + secret_len;
++
++    /* reason is shortstr: 1-byte length + bytes */
++    proto_tree_add_item(args_tree,
++        hf_amqp_method_connection_update_secret_reason,
++        tvb, offset + 1, tvb_get_uint8(tvb, offset),
++        ENC_ASCII | ENC_NA);
++
++    offset += 1 + tvb_get_uint8(tvb, offset);
++
++    return offset;
++}
++
++/*  Dissection routine for method Connection.Update-Secret-Ok             */
++
++static int
++dissect_amqp_0_9_method_connection_update_secret_ok(tvbuff_t* tvb, int offset, proto_tree* args_tree)
++{
++    amqp_mark_modified_build(args_tree, tvb);
++    return offset;
++}
++
+ /*  Dissection routine for method Channel.Open                            */
+ 
+ static int
+@@ -9260,6 +10032,14 @@ dissect_amqp_0_9_frame(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
+                 dissect_amqp_0_9_method_connection_unblocked(tvb,
+                                                              11, args_tree);
+                 break;
++            case AMQP_0_9_METHOD_CONNECTION_UPDATE_SECRET:
++                dissect_amqp_0_9_method_connection_update_secret(tvb,
++                                                                 pinfo, 11, args_tree);
++                break;
++            case AMQP_0_9_METHOD_CONNECTION_UPDATE_SECRET_OK:
++                dissect_amqp_0_9_method_connection_update_secret_ok(tvb,
++                                                                    11, args_tree);
++                break;
+             default:
+                 expert_add_info_format(pinfo, amqp_tree, &ei_amqp_unknown_connection_method, "Unknown connection method %u", method_id);
+             }
+@@ -9824,8 +10604,194 @@ dissect_amqp_0_9_frame(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
+         }
+         break;
+     case AMQP_0_9_FRAME_TYPE_CONTENT_BODY:
+-        proto_tree_add_item(amqp_tree, hf_amqp_payload,
+-                            tvb, 7, length, ENC_NA);
++        proto_item* payload_ti;
++        const guint8* buf;
++        char* text_payload;
++        bool printable = true;
++        unsigned i;
++
++        /* keep original hex */
++        payload_ti = proto_tree_add_item(amqp_tree,
++            hf_amqp_payload,
++            tvb, 7, length, ENC_NA);
++
++        amqp_mark_modified_build(amqp_tree, tvb);
++
++        /* try text decode */
++        buf = tvb_get_ptr(tvb, 7, length);
++
++        /* check if mostly printable */
++        for (i = 0; i < length; i++) {
++            if (buf[i] == '\r' || buf[i] == '\n' || buf[i] == '\t')
++                continue;
++
++            if (!g_ascii_isprint(buf[i])) {
++                printable = false;
++                break;
++            }
++        }
++
++        /* show readable text */
++        if (printable) {
++
++            text_payload = tvb_get_string_enc(
++                pinfo->pool,
++                tvb,
++                7,
++                length,
++                ENC_UTF_8
++            );
++
++            /* JSON */
++            if (amqp_looks_like_json(text_payload)) {
++
++                char* pretty;
++
++                pretty = amqp_pretty_json(pinfo->pool, text_payload);
++
++                proto_tree_add_string_format(
++                    amqp_tree,
++                    hf_amqp_payload_text,
++                    tvb,
++                    7,
++                    length,
++                    pretty,
++                    "Payload JSON:%s",
++                    pretty
++                );
++            }
++
++            /* XML */
++            else if (amqp_looks_like_xml(text_payload)) {
++
++                proto_tree_add_string_format(
++                    amqp_tree,
++                    hf_amqp_payload_text,
++                    tvb,
++                    7,
++                    length,
++                    text_payload,
++                    "Payload XML:%s",
++                    text_payload
++                );
++            }
++
++            /* JWT */
++            else if (amqp_looks_like_jwt_payload(text_payload)) {
++
++                proto_item* jwt_ti;
++                proto_tree* jwt_tree;
++
++                jwt_ti = proto_tree_add_string(
++                    amqp_tree,
++                    hf_amqp_payload_text,
++                    tvb,
++                    7,
++                    length,
++                    text_payload
++                );
++
++                jwt_tree = proto_item_add_subtree(jwt_ti, ett_amqp_jwt);
++
++                dissect_amqp_jwt(
++                    jwt_tree,
++                    tvb,
++                    pinfo,
++                    7,
++                    text_payload
++                );
++            }
++
++            /* BASE64 */
++            else if (amqp_looks_like_base64(text_payload)) {
++
++                char* decoded;
++
++                decoded = amqp_base64_decode_to_string(pinfo->pool, text_payload);
++
++                if (decoded) {
++
++                    if (amqp_looks_like_json(decoded)) {
++                        char* pretty;
++
++                        pretty = amqp_pretty_json(pinfo->pool, decoded);
++
++                        proto_tree_add_string_format(
++                            amqp_tree,
++                            hf_amqp_payload_text,
++                            tvb,
++                            7,
++                            length,
++                            pretty,
++                            "Payload Base64 Decoded JSON:\n%s",
++                            pretty
++                        );
++                    }
++                    else if (amqp_looks_like_jwt_payload(decoded)) {
++                        proto_item* jwt_ti;
++                        proto_tree* jwt_tree;
++
++                        jwt_ti = proto_tree_add_string_format(
++                            amqp_tree,
++                            hf_amqp_payload_text,
++                            tvb,
++                            7,
++                            length,
++                            decoded,
++                            "Payload Base64 Decoded JWT: %s",
++                            decoded
++                        );
++
++                        jwt_tree = proto_item_add_subtree(jwt_ti, ett_amqp_jwt);
++
++                        dissect_amqp_jwt(
++                            jwt_tree,
++                            tvb,
++                            pinfo,
++                            7,
++                            decoded
++                        );
++                    }
++                    else {
++                        proto_tree_add_string_format(
++                            amqp_tree,
++                            hf_amqp_payload_text,
++                            tvb,
++                            7,
++                            length,
++                            decoded,
++                            "Payload Base64 Decoded Text: %s",
++                            decoded
++                        );
++                    }
++                }
++                else {
++                    proto_tree_add_string_format(
++                        amqp_tree,
++                        hf_amqp_payload_text,
++                        tvb,
++                        7,
++                        length,
++                        text_payload,
++                        "Payload Base64: %s",
++                        text_payload
++                    );
++                }
++            }
++
++            /* Plain text */
++            else {
++
++                proto_tree_add_string(
++                    amqp_tree,
++                    hf_amqp_payload_text,
++                    tvb,
++                    7,
++                    length,
++                    text_payload
++                );
++            }
++        }
+         col_append_str(pinfo->cinfo, COL_INFO, "Content-Body ");
+ 
+         /* try to find dissector for content */
+@@ -12556,6 +13522,42 @@ proto_register_amqp(void)
+             "Reason", "amqp.method.arguments.reason",
+              FT_STRING, BASE_NONE, NULL, 0,
+             NULL, HFILL}},
++        {&hf_amqp_method_connection_update_secret_new_secret, {
++            "New Secret", "amqp.method.arguments.new_secret",
++            FT_STRING, BASE_NONE, NULL, 0,
++            NULL, HFILL}},
++        {&hf_amqp_method_connection_update_secret_reason, {
++            "Reason", "amqp.method.arguments.reason",
++            FT_STRING, BASE_NONE, NULL, 0,
++            NULL, HFILL}},
++        {&hf_amqp_jwt_header_b64, {
++            "JWT Header Base64URL", "amqp.jwt.header_b64",
++            FT_STRING, BASE_NONE, NULL, 0,
++            NULL, HFILL}},
++        {&hf_amqp_jwt_payload_b64, {
++            "JWT Payload Base64URL", "amqp.jwt.payload_b64",
++            FT_STRING, BASE_NONE, NULL, 0,
++            NULL, HFILL}},
++        {&hf_amqp_jwt_signature_b64, {
++            "JWT Signature Base64URL", "amqp.jwt.signature_b64",
++            FT_STRING, BASE_NONE, NULL, 0,
++            NULL, HFILL}},
++        {&hf_amqp_jwt_header_json, {
++            "JWT Header JSON", "amqp.jwt.header_json",
++            FT_STRING, BASE_NONE, NULL, 0,
++            NULL, HFILL}},
++        {&hf_amqp_jwt_payload_json, {
++            "JWT Payload JSON", "amqp.jwt.payload_json",
++            FT_STRING, BASE_NONE, NULL, 0,
++            NULL, HFILL}},
++        {&hf_amqp_jwt_claim, {
++            "JWT Claim", "amqp.jwt.claim",
++            FT_STRING, BASE_NONE, NULL, 0,
++            NULL, HFILL} },
++        {&hf_amqp_jwt_claim_scope, {
++            "scope", "amqp.jwt.payload.scope",
++            FT_STRING, BASE_NONE, NULL, 0,
++            NULL, HFILL}},
+         {&hf_amqp_method_channel_open_out_of_band, {
+             "Out-Of-Band", "amqp.method.arguments.out_of_band",
+             FT_STRING, BASE_NONE, NULL, 0,
+@@ -13512,6 +14514,14 @@ proto_register_amqp(void)
+             "Payload", "amqp.payload",
+             FT_BYTES, BASE_NONE, NULL, 0,
+             "Message payload", HFILL}},
++        {&hf_amqp_payload_text, {
++            "Payload Text", "amqp.payload_text",
++            FT_STRING, BASE_NONE, NULL, 0,
++            "Decoded payload text", HFILL} },
++        {&hf_amqp_build, {
++            "Modified build", "amqp.build",
++            FT_STRING, BASE_NONE, NULL, 0,
++            "This AMQP dissector has been modified from upstream Wireshark", HFILL} },
+         {&hf_amqp_init_protocol, {
+             "Protocol", "amqp.init.protocol",
+             FT_STRING, BASE_NONE, NULL, 0,
+@@ -13629,7 +14639,10 @@ proto_register_amqp(void)
+          &ett_amqp_0_10_struct,
+          &ett_amqp_1_0_array,
+          &ett_amqp_1_0_map,
+-         &ett_amqp_1_0_list
++         &ett_amqp_1_0_list,
++         &ett_amqp_jwt,
++         &ett_amqp_jwt_header,
++         &ett_amqp_jwt_payload
+     };
+ 
+     static ei_register_info ei[] = {
