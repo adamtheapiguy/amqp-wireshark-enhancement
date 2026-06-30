@@ -44,11 +44,30 @@ by hand.
 3. Run the installer.
 
 > ⚠️ **Self-signed.** The code signature is **not** backed by a public CA, so Windows SmartScreen
-> shows an "unknown publisher" warning. **Verify the SHA-256 hash**, not the signature.
+> shows an "unknown publisher" warning. **Verify the SHA-256 hash** (step 2) — that is the
+> recommended check and needs no trust setup.
 >
 > ⚠️ **Npcap.** The installer bundles the Npcap capture driver, whose free licence restricts
 > redistribution. If you did not receive this directly from the author under appropriate terms,
 > install Npcap yourself from https://npcap.com.
+
+#### Optional — validate the code signature
+
+The public signing certificate (`adamTheApiGuy-public.cer`) is included in this repo so you can
+validate the Authenticode signature if you wish. It contains **no private key** and cannot sign
+anything. To make Windows trust the signature, import it into your Current-User Trusted Root store,
+then verify:
+
+```powershell
+Import-Certificate -FilePath .\adamTheApiGuy-public.cer -CertStoreLocation Cert:\CurrentUser\Root
+Get-AuthenticodeSignature .\Wireshark-4.7.2-*-x64.exe | Format-List Status, SignerCertificate
+```
+
+`Status : Valid` confirms the file was signed by this certificate and is unmodified.
+
+> ⚠️ Importing a certificate into Trusted Root tells Windows to trust **anything** signed by it,
+> now and in future — only do this if you trust the source. The SHA-256 hash check above verifies
+> file integrity **without** importing anything, and is the recommended default.
 
 ### Option 2 — Drop-in library (if you already run Wireshark 4.7.2)
 
@@ -99,6 +118,7 @@ Once installed, these isolate the enhanced dissections:
 |------|---------|
 | `packet-amqp.c` | The full modified dissector source. |
 | `packet-amqp.patch` | Unified diff against upstream Wireshark. |
+| `adamTheApiGuy-public.cer` | Public signing certificate (no private key) for optional signature validation. |
 
 ---
 
