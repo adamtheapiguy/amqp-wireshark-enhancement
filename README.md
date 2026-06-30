@@ -3,6 +3,9 @@
 Custom enhancements to the Wireshark **AMQP 0-9-1** dissector (`epan/dissectors/packet-amqp.c`),
 built against Wireshark 4.7.2.
 
+The easiest way to try it is the **[pre-built installer](#pre-built-binaries)** — download, install,
+done. No need to already have Wireshark or match a specific version.
+
 Modified packets carry a generated `amqp.build` field that points back to this repository, so a
 capture analysed with this build is self-identifying.
 
@@ -21,22 +24,45 @@ A generated **`amqp.build`** marker is attached to exactly the dissections above
 
 ---
 
-## Repository contents
+## Pre-built binaries
 
-| File | Purpose |
-|------|---------|
-| `packet-amqp.c` | The full modified dissector source. |
-| `packet-amqp.patch` | Unified diff against upstream Wireshark (`+1008 / −24`, 12 hunks). |
+Attached to the [latest Release](../../releases/latest).
 
-A pre-built `libwireshark.dll` and an optional full installer are attached to the
-[latest Release](../../releases/latest) — see [Pre-built binaries](#pre-built-binaries).
+### Full installer — easiest, start here
+
+**`Wireshark-4.7.2-...-x64.exe`** — a complete, self-contained Wireshark installer with the
+modified AMQP dissector already built in. **Just download and install.** You do **not** need to
+already have Wireshark, and you do **not** need to match a specific version or copy any files by
+hand. This is the recommended way to try the enhancement.
+
+Verify the download against the attached `.sha256`:
+
+```powershell
+Get-FileHash .\Wireshark-4.7.2-*-x64.exe -Algorithm SHA256
+# compare against the .sha256 file in the Release
+```
+
+> ⚠️ **Self-signed.** The installer's code signature is **not** backed by a public CA, so Windows
+> SmartScreen shows an "unknown publisher" warning. **Verify the SHA-256 hash**, not the signature.
+>
+> ⚠️ **Npcap.** The installer bundles the Npcap capture driver, whose free licence restricts
+> redistribution. If you did not receive this directly from the author under appropriate terms,
+> install Npcap yourself from https://npcap.com.
+
+### Drop-in DLL — advanced
+
+**`libwireshark.dll`** — replaces the library in an existing Wireshark install.
+
+> ⚠️ **ABI-specific.** The library ABI is version-locked, so this only works dropped into a
+> **matching Wireshark 4.7.2** install. If you are not already on that exact version, use the full
+> installer above, or build from source.
 
 ---
 
-## Test it (build from source — recommended)
+## Build from source
 
-This is the reliable path: it guarantees an ABI-compatible build and shows the custom build
-string in **Help → About**.
+For a from-source build (e.g. to inspect or modify the code yourself), apply the patch to a
+Wireshark checkout:
 
 ```bash
 # 1. Clone Wireshark
@@ -62,30 +88,12 @@ git apply /path/to/packet-amqp.patch
 
 ---
 
-## Pre-built binaries
+## Repository contents
 
-Attached to the [latest Release](../../releases/latest).
-
-**`libwireshark.dll`** — drop-in replacement carrying the modified dissector.
-
-> ⚠️ **ABI-specific.** The library ABI is version-locked. This DLL only works dropped into a
-> **matching Wireshark 4.7.2** install. For any other version, build from source (above).
-
-**Full installer** (optional, if attached): `Wireshark-4.7.2-...-x64.exe` + `.sha256`.
-
-Verify the download:
-
-```powershell
-Get-FileHash .\Wireshark-4.7.2-*-x64.exe -Algorithm SHA256
-# compare against the .sha256 file in the Release
-```
-
-> ⚠️ **Self-signed.** The installer's code signature is **not** backed by a public CA, so Windows
-> SmartScreen shows an "unknown publisher" warning. **Verify the SHA-256 hash**, not the signature.
->
-> ⚠️ **Npcap.** The installer bundles the Npcap capture driver, whose free licence restricts
-> redistribution. If you did not receive this directly from the author under appropriate terms,
-> install Npcap yourself from https://npcap.com.
+| File | Purpose |
+|------|---------|
+| `packet-amqp.c` | The full modified dissector source. |
+| `packet-amqp.patch` | Unified diff against upstream Wireshark. |
 
 ---
 
