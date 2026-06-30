@@ -3,8 +3,8 @@
 Custom enhancements to the Wireshark **AMQP 0-9-1** dissector (`epan/dissectors/packet-amqp.c`),
 built against Wireshark 4.7.2.
 
-The easiest way to try it is the **[pre-built installer](#pre-built-binaries)** — download, install,
-done. No need to already have Wireshark or match a specific version.
+The easiest way to try it is **[Option 1 — the pre-built installer](#option-1--full-installer-easiest)**:
+download, install, done. No existing Wireshark required, no version to match.
 
 Modified packets carry a generated `amqp.build` field that points back to this repository, so a
 capture analysed with this build is self-identifying.
@@ -24,45 +24,46 @@ A generated **`amqp.build`** marker is attached to exactly the dissections above
 
 ---
 
-## Pre-built binaries
+## How to use it
 
-Attached to the [latest Release](../../releases/latest).
+Three ways, easiest first. Pick one.
 
-### Full installer — easiest, start here
+### Option 1 — Full installer (easiest)
 
-**`Wireshark-4.7.2-...-x64.exe`** — a complete, self-contained Wireshark installer with the
-modified AMQP dissector already built in. **Just download and install.** You do **not** need to
-already have Wireshark, and you do **not** need to match a specific version or copy any files by
-hand. This is the recommended way to try the enhancement.
+A complete, self-contained Wireshark installer with the modified dissector already built in.
+**Just download and install** — no existing Wireshark needed, no version to match, nothing to copy
+by hand.
 
-Verify the download against the attached `.sha256`:
+1. Download `Wireshark-4.7.2-...-x64.exe` and its `.sha256` from the
+   [latest Release](../../releases/latest).
+2. Verify the download:
+   ```powershell
+   Get-FileHash .\Wireshark-4.7.2-*-x64.exe -Algorithm SHA256
+   # compare against the .sha256 file in the Release
+   ```
+3. Run the installer.
 
-```powershell
-Get-FileHash .\Wireshark-4.7.2-*-x64.exe -Algorithm SHA256
-# compare against the .sha256 file in the Release
-```
-
-> ⚠️ **Self-signed.** The installer's code signature is **not** backed by a public CA, so Windows
-> SmartScreen shows an "unknown publisher" warning. **Verify the SHA-256 hash**, not the signature.
+> ⚠️ **Self-signed.** The code signature is **not** backed by a public CA, so Windows SmartScreen
+> shows an "unknown publisher" warning. **Verify the SHA-256 hash**, not the signature.
 >
 > ⚠️ **Npcap.** The installer bundles the Npcap capture driver, whose free licence restricts
 > redistribution. If you did not receive this directly from the author under appropriate terms,
 > install Npcap yourself from https://npcap.com.
 
-### Drop-in DLL — advanced
+### Option 2 — Drop-in library (if you already run Wireshark 4.7.2)
 
-**`libwireshark.dll`** — replaces the library in an existing Wireshark install.
+Replace the dissector library in an existing install.
 
-> ⚠️ **ABI-specific.** The library ABI is version-locked, so this only works dropped into a
-> **matching Wireshark 4.7.2** install. If you are not already on that exact version, use the full
-> installer above, or build from source.
+1. Download `libwireshark.dll` from the [latest Release](../../releases/latest).
+2. Back up the existing `libwireshark.dll` in your Wireshark program folder, then replace it with
+   the downloaded one.
 
----
+> ⚠️ **ABI-specific.** The library ABI is version-locked — this only works dropped into a
+> **matching Wireshark 4.7.2** install. On any other version, use Option 1 or Option 3.
 
-## Build from source
+### Option 3 — Build from source (inspect or modify the code)
 
-For a from-source build (e.g. to inspect or modify the code yourself), apply the patch to a
-Wireshark checkout:
+Apply the patch to a Wireshark checkout and build it yourself.
 
 ```bash
 # 1. Clone Wireshark
@@ -77,7 +78,11 @@ git apply /path/to/packet-amqp.patch
 #    https://www.wireshark.org/docs/wsdg_html_chunked/ChSetupWindows.html
 ```
 
-### Display filters
+---
+
+## Display filters
+
+Once installed, these isolate the enhanced dissections:
 
 | Filter | Shows |
 |--------|-------|
