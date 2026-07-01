@@ -10,6 +10,10 @@ existing Wireshark required, no version to match.
 Modified packets carry a generated `amqp.build` field that points back to this repository, so a
 capture analysed with this build is self-identifying.
 
+> 🛠️ Building it yourself? See **[WINDOWS-DEV-SETUP.md](WINDOWS-DEV-SETUP.md)** for a full Windows
+> development-environment guide, and **[`build-installer.ps1`](build-installer.ps1)** for a
+> one-command build/sign/package script.
+
 ---
 
 ## What it does
@@ -75,8 +79,8 @@ Get-AuthenticodeSignature .\Wireshark-4.7.2-*-x64.exe | Format-List Status, Sign
 Replace the dissector library in an existing install.
 
 1. Download `libwireshark.dll` from the [latest Release](../../releases/latest).
-2. Back up the existing `libwireshark.dll` in your Wireshark program folder, then replace it with
-   the downloaded one.
+2. Back up the existing `libwireshark.dll` in your Wireshark program folder (next to
+   `Wireshark.exe`), then replace it with the downloaded one.
 
 > ⚠️ **ABI-specific — read this first.** This DLL was compiled from a particular Wireshark 4.7.2
 > source checkout, and only works when dropped into a Wireshark whose library ABI matches that
@@ -105,6 +109,11 @@ git apply /path/to/packet-amqp.patch
 #    https://www.wireshark.org/docs/wsdg_html_chunked/ChSetupWindows.html
 ```
 
+> 🛠️ **On Windows?** [WINDOWS-DEV-SETUP.md](WINDOWS-DEV-SETUP.md) is a complete, tested setup guide
+> (Visual Studio, Qt, NSIS, xsltproc, environment variables) with a gotcha quick-reference. Once
+> set up, [`build-installer.ps1`](build-installer.ps1) does configure → build → sign → hash in one
+> command.
+>
 > ℹ️ **Where to get Wireshark itself:** the stable downloads at
 > <https://www.wireshark.org/download.html> are the 4.x stable line, suitable for normal use and as
 > a base for building. Note they are *not* the 4.7.2 development build this enhancement targets — to
@@ -132,6 +141,8 @@ Once installed, these isolate the enhanced dissections:
 | `packet-amqp.c` | The full modified dissector source. |
 | `packet-amqp.patch` | Unified diff against upstream Wireshark. |
 | `adamTheApiGuy-public.cer` | Public signing certificate (no private key) for optional signature validation. |
+| [`WINDOWS-DEV-SETUP.md`](WINDOWS-DEV-SETUP.md) | Windows development-environment setup guide. |
+| [`build-installer.ps1`](build-installer.ps1) | One-command build / sign / package script. |
 
 ---
 
